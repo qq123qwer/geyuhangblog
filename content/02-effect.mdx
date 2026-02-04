@@ -1,0 +1,241 @@
+---
+title: "01-Vue3 effect"
+date: "2026-02-04"
+description: ""
+tags: ["Vue3", "blog"]
+---
+
+# effect
+
+Vue3文档中有一个例子
+
+```
+function update(){
+  A0 = A1 + A2
+}
+
+```
+
+这个例子中，update函数会产生一个副作用，或者称为一个作用，
+因为它会更改程序里的状态
+A1 , A2 被称为这个作用的依赖， 因为他们的值被用来执行这个依赖
+因此，这个作用也可以被称作它的依赖的一个订阅者。
+
+# 实现一个effect
+
+当变量被访问时，进行依赖收集，当变量改变时，触发更新, 这里就涉及track(依赖收集) trigger(触发更新)
+
+```
+// 当前激活的栈顶
+let activeEffect: Effect | null;
+
+let effectStack: Effect[] =[];
+
+class Effect {
+  public scheduler?: Function;
+  constructor(public fn: Function , options?:{scheduler?: Function}){
+    this.scheduler = options?.scheduler
+  }
+  run(){
+    if(effectStack.includes(this)) return;
+    try{
+      effectStack.push(this);
+      activeEffect = this;
+      return this.fn();
+    }finally{
+      effectStack.pop();
+      activeEffect = effectStack[effectStack.length - 1]
+    }
+  }
+}
+
+// 存放所有依赖该属性的函数 ， 并自动去重
+
+const depsMap = new WeakMap<Object , Map<Property, Set<Effect> >>()
+
+// 依赖收集 { obj : { key: [effect , effect , ....] } }
+function track(target: Object, key: Property){
+  // activeEffect 为null , 没有进入effect , 不需要进行依赖收集
+  if(!activeEffect) return;
+  let deps = depsMap.get(target); // 第一层 key: 目标对象
+  if(!deps){
+    deps = new Map<Property, Set<Effect>>()
+    depsMap.set(target , deps)
+  }
+
+  let dep = deps.get(key); // 第二层 key: 目标对象属性名
+  if(!dep){
+    dep = new Set<Effect>();
+    deps.add(key , dep);
+  }
+
+  iF(!dep.has(activeEffect)){ // 第三层 : 依赖于该属性的集合，自动去重
+    dep.add(activeEffect);
+  }
+
+}
+
+// 触发更新
+funciton trigger(target: Object , key: Property){
+  let deps = depsMap.get(target);
+  if(!deps) return;
+  let dep = deps.get(key);
+  if(!dep) return;
+  if(dep.length !== 0){
+    dep.forEach((effect)=>{
+      // 要修改不是当前运行的
+      if(effect === activeEffect ) return;
+      if (effect.scheduler) {
+        effect.scheduler();
+      } else {
+        effect.run();
+      }
+    })
+  }
+}
+
+// 上面就实现了trigger,和track函数
+
+// 在Reactive中加入这个函数
+const handler:ProxyHandler<object> = {
+  get(target, key , receiver){
+    // 进行依赖收集
+    track(target , key);
+    return Reflect(target , key , receiver)
+  },
+  set(targte , key , value , receiver){
+    const res = Reflect.set(target , key , value , receiver);
+    // 触发更新
+    trigger(target , key);
+
+    return res;
+  }
+}
+
+```
+
+现在可以完成初步的effect
+但是还有缺陷:
+
+```
+const state = recative({
+  name: '111',
+  age: 20,
+  flag: true,
+})
+
+const _effect = new Effect(()=>{
+  app.innerHtml = state.flag ? state.name : state.age;
+})
+
+_effect.run()
+
+setTimeout(()=>{
+  state.flag = false;
+  setTimeout(()=>{
+    state.age = 30;
+  } , 1000)
+} , 1000)
+
+对于这段代码来说，
+当执行 app.innerHtml = state.flag ? state.name : state.age;
+因为state.flag 是true, 所以依赖收集： flag , name
+第一层嵌套的setTimeout嵌套执行完成之后，flag变成false, 这个时候依赖收集就是flag,name , age
+但是没有用到name这个属性，会产生依赖堆积
+
+，这个时候就需要用到清除函数，effectStack 在push之前，清除依赖集合，保证依赖的纯洁
+
+
+
+
+function CleanUP (effect: Effect){
+  const { deps } = effect;
+  if(deps.length){
+    for(let i = 0 ; i < deps.length ; i++){
+      deps[i].delete(effect)
+    }
+  }
+  deps.length = 0;
+}
+
+class Effect {
+  private deps: Set<Effect>[] = []
+
+  public scheduler?: Function;
+  constructor(public fn: Function , options?:{scheduler?: Function}){
+    this.scheduler = options?.scheduler
+  }
+  run(){
+    if(effectStack.includes(this)) return;
+    try{
+      CleanUP(this)
+      effectStack.push(this);
+      activeEffect = this;
+      return this.fn();
+    }finally{
+      effectStack.pop();
+      activeEffect = effectStack[effectStack.length - 1]
+    }
+  }
+}
+
+// 三层结构 {target, { key , []}}
+const depsMap = new WeakMap<target , Map<Property , Set<Effect>>>()
+
+function track(target: Object , key: Property){
+  if(!activeEffect) return;
+  let deps = depsMap.get(target) // 第一层：key 当前对象
+  if(!deps){
+    deps = new Map(key , Set<Effect>);
+    depsMap.set(target , deps);
+  }
+  let dep = deps.get(key); // 第二层key: 对象属性
+  if(!dep){
+    dep = new Set<Effect>()
+    deps.set(key , dep)
+  }
+  if(!dep.has(activeEffect)){
+
+    dep.add(activeEffect);
+    activeEffect.deps.push(dep);
+  }
+}
+
+```
+
+如果是状态多次修改，会触发多次更新，但是Vue3中是： 状态多次修改，页面只更新一次。
+使用到异步调度的方法，effect构造器中的shceduler,
+触发更新中，如果scheduler中存在方法，就使用这里面的
+
+```
+1. 将执行的任务收集到队列中
+const queue = new Set(); // 使用set自动去重
+let isPassing = false; // 确保在一个同步任务周期内，微任务被创建一次
+const p = Promise.resolve(); // 产生微任务
+
+const quequeJob = (job){
+  queue.add(job);
+  if(!isPassing){
+    isPassing = true;
+    p.then(()=>{
+      try{
+        queue.forEach(job=>job())
+      }finally{
+        isPassing = false;
+        queue.clear();
+      }
+    })
+  }
+}
+
+const _effect = new Effect(()=>{
+
+}, {
+    scheduler() {
+      // 当数据变化时，不直接 run，而是入队
+      // 使用箭头函数保证this指向
+      queueJob(() => this.run()); // run 具备重新收集的能力 
+    }
+})
+
+```

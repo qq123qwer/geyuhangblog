@@ -1,0 +1,43 @@
+---
+title: "03-Vue3 Ref"
+date: "2026-02-04"
+description: "在Vue3中，ref不能使用Proxy实现响应式， ref可以传对象/基本数据类型，proxy只接受对象代理"
+tags: ["Vue3", "blog"]
+---
+
+```
+class newRef{
+  private _rawvalue:any
+  private _value:any
+
+  constructor(value:any){
+    this._rawvalue = value;
+    this._value = convert(value);
+  }
+
+  get value(){
+    track(this,'value');
+    return this._value
+  }
+  set value(newvalue){
+    if(newvalue !== this._rawvalue){
+      this._rawvalue = value
+      this._value = newValue
+      trigger(this , 'value')
+    }
+  }
+}
+
+function convert(target:any){
+  return isObject(target)? makeReactive(target) : target
+}
+
+```
+
+为什么要搞一个 _rawvalue？
+代码里设计了 _rawvalue 和 _value 两个变量 原因如下：
+
+避免重复包装：如果 value 是一个对象，_value 会变成一个 Proxy。
+            但在 set 的时候，如果用户传进来一个 Proxy，直接对比 Proxy !== Proxy 可能会出问题。
+
+性能优化：对比原始值（Raw Value）比对比响应式对象更稳定且高效。

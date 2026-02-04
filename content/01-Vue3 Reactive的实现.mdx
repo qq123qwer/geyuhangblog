@@ -1,0 +1,86 @@
+---
+title: "01-Vue3 Reactive的实现"
+date: "2026-02-04"
+description: "在Vue3中，Reactive的实现主要是依赖于proxy, 因为proxy只能代理对象，所以Reactive中传的值也是对象"
+tags: ["Vue3", "blog"]
+---
+
+# Reactive的实现
+
+根据Vue3文档中的特点，手动实现Reactive需要满足以下几点
+***1. 只能代理对象***
+***2. 不能进行重复代理***
+***3. 防止代理已经代理对象***
+
+```
+// 1. 声明一个判断是否是对象的函数
+function isObject(target: any){
+  return typeof target === "object" && target !== null;
+}
+
+// 2. 创建handler
+const handler: ProxyHandler<object> = {
+  get(target ,key , receiver){
+    if(key === '__OK__') return true;
+    // return target[key];
+    return Reflect.get(target , value , receiver);
+  },
+  set(target , key , value , receiver){
+    // return target[key] = value;
+    const res = Reflect(target , key , value , receiver);
+    return res;
+  }
+}
+
+const map = new WeakMap<Object , any>();
+
+enum isProxyEnum {
+  "isProxy"="__OK__"
+}
+
+const makeReactive = (target:any) => {
+  // 如果不是对象则返回
+  if(!(isObject(target))) return target;
+  // 防止重复代理，这里就需要用到WeakMap
+  if(map.has(target)) return map.get(target);
+  // 防止代理已经代理的对象, 这是因为，如果target已经被代理，那麽他就会触发get方法
+  if(target[isProxyEnum.isProxy]) return target;
+  map.set(target , new Proxy(target , handler));
+  return map.get(target);
+}
+```
+这里就出现第一个问题，为什莫要使用WeakMap，不使用其他方式, 原因如下：
+***1. 弱引用与自动回收（核心原因）***
+WeakMap对键是弱引用的
+普通Map: 只要Map实例还在，它内部引用的所有对象都不会被垃圾回收。
+        即使你的业务代码中已经把target置为null，由于Map还拽着它，这个对象就会一直常驻内存
+WeakMap: 它的引用不计入垃圾回收检查。如果除了这个WeakMap之外，没有其他地方引用该对象了
+        垃圾回收器就会像“看不见”这个WeakMap一样，直接把该对象回收掉
+
+***2. 防止内存泄漏***
+如果使用Map，每代理一个对象，内存就会增加一点，且永远不会释放，直到页面关闭。
+            这会导致内存持续升高，最终页面卡顿崩溃。
+使用WeakMap: 当某个组件销毁时，他关联的数据对象不在被使用时，WeakMap中对应的
+            代理关系会自动消失，内存得到释放
+
+***3. 键名的特殊性***
+WeakMap强制要求键名必须是对象，我们要存储的是target（对象） -> proxy（代理后的对象）
+因为不知道当前一共有多少个对象代理，因此WeakMap的局限性在这个反而成了轻量化的优势
+
+我在使用过程中还发现一个问题：
+```
+const state = makeReactive({
+  name: 'hang',
+  get Names(){
+    return this.name + 'alias'
+  }
+})
+
+console.log(state.Names) // 打印： hangalias
+state.Names 获取到这个属性时，里面的this指向的是当前对象，而不是代理对象，
+解决的方式是，target[key] 换成 Reflect.get(target , key , receiver), receiver是代理对象
+
+Reflect 返回布尔值，不会导致程序崩溃
+```
+
+
